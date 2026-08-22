@@ -24,7 +24,7 @@ function cardLabel(c: Card): string {
     case "draw2":
       return "+2";
     case "wild":
-      return "★";
+      return "";
     case "wild4":
       return "+4";
     default:
@@ -88,7 +88,8 @@ export function UnoCard({
       ? WILD_BG
       : COLOR_BG[(card!.color === "wild" ? "red" : card!.color) as Color];
   const label = faceDown ? "" : card ? cardLabel(card) : "";
-  const textColor = !faceDown && card?.color === "yellow" ? "text-black" : "";
+  // 数字・記号は常に黒(白楕円の上に載る)
+  const textColor = faceDown ? "" : "text-neutral-900";
 
   return (
     <button

@@ -5,5 +5,4 @@ export interface Env {
   KV: KVNamespace;
   DB: D1Database;
   THEMES: R2Bucket;
-  ASSETS: Fetcher;
 }

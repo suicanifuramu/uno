@@ -21,7 +21,10 @@ export function RulesContent() {
                 引いたカードが出せる場合は、その場で出して構いません(出さないならキープしてターン終了)。
               </li>
               <li>ワイルド系は常に出せて、出す時に色を指定します。</li>
-              <li>最初に手札をすべて出した人の勝ちです。</li>
+              <li>
+                <b>同じ数字は連続で出せます</b>(色は問わない)。出した後も同じ数字が手札にある場合は3秒間続けて出せます。
+              </li>
+              <li>最初に手札をすべて出した人の勝ちです。ただしUNO宣言が未完了の場合はペナルティがあります。</li>
             </ul>
           </AccordionContent>
         </AccordionItem>
@@ -56,11 +59,12 @@ export function RulesContent() {
           <AccordionTrigger>UNO宣言</AccordionTrigger>
           <AccordionContent>
             <ul className="list-disc space-y-2 pl-5 text-sm leading-6">
-              <li>手札が2枚になったら「UNO!」ボタンを押して宣言してください。</li>
               <li>
-                宣言せずに2枚目を出すと、ペナルティとして2枚引かされます。
+                手札が残り1枚になったら、自分の番で「UNO!」ボタンを押して宣言してください。
               </li>
-              <li>宣言できるのは手札がちょうど2枚の間だけです。</li>
+              <li>
+                宣言せずにそのままターンを終える(または最後の1枚を出す)と、ペナルティとして2枚引かされます。
+              </li>
             </ul>
           </AccordionContent>
         </AccordionItem>

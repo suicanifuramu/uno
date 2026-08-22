@@ -1,30 +1,12 @@
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "uno-online",
-  "main": "worker/index.ts",
-  "compatibility_date": "2025-05-25",
-  "assets": {
-    "directory": "./dist",
-    "binding": "ASSETS",
-    "not_found_handling": "single-page-application"
-  },
-  "durable_objects": {
-    "bindings": [{ "name": "ROOMS", "class_name": "GameRoom" }]
-  },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["GameRoom"] }],
-  "kv_namespaces": [
-    { "binding": "KV", "id": "REPLACE_WITH_KV_ID" }
-  ],
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "uno-db",
-      "database_id": "REPLACE_WITH_D1_ID",
-      "migrations_dir": "migrations"
-    }
-  ],
-  "r2_buckets": [
-    { "binding": "THEMES", "bucket_name": "uno-themes" }
-  ],
-  "observability": { "enabled": true }
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "uno-online",
+	"compatibility_date": "2025-05-25",
+	"pages_build_output_dir": "dist",
+	"services": [
+		{
+			"binding": "API",
+			"service": "uno-online"
+		}
+	]
 }

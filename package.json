@@ -5,12 +5,13 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "dev:worker": "wrangler dev",
+    "dev:worker": "wrangler dev -c worker/wrangler.jsonc --port 8787",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b",
     "lint": "oxlint src worker",
-    "deploy": "npm run build && wrangler deploy",
-    "cf:setup": "wrangler d1 create uno-db && wrangler kv namespace create ROOMS && wrangler r2 bucket create uno-themes"
+    "deploy": "npm run build && wrangler pages deploy",
+    "cf:setup": "wrangler d1 create uno-db && wrangler kv namespace create ROOMS && wrangler r2 bucket create uno-themes",
+    "deploy:worker": "wrangler deploy -c worker/wrangler.jsonc"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",

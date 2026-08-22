@@ -1,0 +1,46 @@
+{
+	"$schema": "../node_modules/wrangler/config-schema.json",
+	"name": "uno-online",
+	"main": "index.ts",
+	"account_id": "282d246f296a5ba073a821fadf2a501b",
+	"compatibility_date": "2025-05-25",
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "ROOMS",
+				"class_name": "GameRoom"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": [
+				"GameRoom"
+			]
+		}
+	],
+	"kv_namespaces": [
+		{
+			"binding": "KV",
+			"id": "715c100a3acb4eec905828706fa6b48d"
+		}
+	],
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "uno-db",
+			"database_id": "7d5b712b-59e9-47e7-9013-b048ead1a5f8",
+			"migrations_dir": "../migrations"
+		}
+	],
+	"r2_buckets": [
+		{
+			"binding": "THEMES",
+			"bucket_name": "uno-themes"
+		}
+	],
+	"observability": {
+		"enabled": true
+	}
+}

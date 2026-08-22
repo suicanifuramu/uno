@@ -89,7 +89,12 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
   }
 
   if (request.method === "GET" && url.pathname === "/api/theme") {
-    const obj = await env.THEMES.get("theme.json");
+    let obj: R2ObjectBody | null = null;
+    try {
+      obj = await env.THEMES.get("theme.json");
+    } catch {
+      // R2 未有効化/バケット無しでもデフォルトを返す
+    }
     if (obj) {
       return new Response(obj.body, {
         headers: { "content-type": "application/json", "cache-control": "public, max-age=60" },
@@ -115,7 +120,7 @@ export default {
       const stub = env.ROOMS.getByName(code);
       return stub.fetch(request);
     }
-    // 静的アセット(SPA フォールバックは assets 設定が処理)
-    return env.ASSETS.fetch(request);
+    // 静的配信は Pages 側。Worker は API/WS 専用
+    return json({ error: "not found" }, 404);
   },
 } satisfies ExportedHandler<Env>;

@@ -8,11 +8,17 @@ Cloudflare Workers + Durable Objects によるサーバ権威のリアルタイ�
 | 層 | 技術 |
 |---|---|
 | フロント | Vite + React 19 + Tailwind v4 + shadcn/ui (base/nova) + diceui(segmented-input, status) |
-| 配信・API | Cloudflare Workers(Static Assets = Pages+Functions の現行形態。DO は Pages Functions では使えないため Workers 構成) |
-| リアルタイム | Durable Objects `GameRoom`(WebSocket Hibernation + DO alarm ターンタイマー) |
+| 配信 | **Cloudflare Pages**(静的 SPA)。`functions/` の Pages Functions が `/api/*`, `/ws/*` を Service Binding 経由で Worker へ転送 |
+| リアルタイム | **Worker**(uno-online)+ Durable Objects `GameRoom`(WS Hibernation + alarm タイマー)。※DOはPages Functionsから直接バインドできないため実体は Worker |
 | KV | 公開部屋リスト(`room:<code>`, TTL 1h) |
 | D1 | 対戦記録 `matches` テーブル → リーダーボード |
 | R2 | UI テーマJSON(`theme.json`)。無ければデフォルトを使用 |
+
+```
+ブラウザ → uno-online-*.pages.dev
+             ├─ 静的アセット(Pages)
+             └─ functions/api|ws ──Service Binding──▶ uno-online.workers.dev (Worker+DO)
+```
 
 ## 遊び方 / 実装済みルール
 
@@ -30,35 +36,40 @@ Cloudflare Workers + Durable Objects によるサーバ権威のリアルタイ�
 ```bash
 npm install
 npm run cf:setup        # 初回のみ: D1/KV/R2 作成(要 wrangler login)
-
-# 表示された ID を wrangler.jsonc の REPLACE_WITH_* へ転記
+# → IDを worker/wrangler.jsonc に転記
 npx wrangler d1 migrations apply uno-db --local
 
 # ターミナル2つ
 npm run dev             # vite :5173 (/api, /ws を 8787 へプロキシ)
-npm run dev:worker      # wrangler dev :8787
+npm run dev:worker      # wrangler dev :8787 (worker/wrangler.jsonc)
 ```
 
-## デプロイ
+## デプロイ(Pages + Worker)
 
 ```bash
-# 1. リソース作成と ID 転記(ローカル開発と同じ)
+# 1. リソース作成とID転記(初回のみ。ローカル開発と同じ)
 wrangler d1 create uno-db
 wrangler kv namespace create ROOMS
 wrangler r2 bucket create uno-themes
-# → wrangler.jsonc の REPLACE_WITH_KV_ID / REPLACE_WITH_D1_ID を更新
+# → worker/wrangler.jsonc の ID を更新
 
-# 2. マイグレーション(リモート)
+# 2. D1 マイグレーション(リモート)
 npx wrangler d1 migrations apply uno-db --remote
 
-# 3. デプロイ(dist へビルドして Worker + Assets として公開)
-npm run deploy
+# 3. API/WS バックエンド(DO)をデプロイ
+npm run deploy:worker
+
+# 4. フロント+Pages Functions をデプロイ
+#    ※初回のみ: npx wrangler pages project create uno-online --production-branch main
+npm run deploy          # → https://<project>.pages.dev
 ```
+
+Service Binding(`API`)は root `wrangler.jsonc` で設定済み。
+Worker 側のコードを変えたら `deploy:worker`、フロントだけなら `deploy` だけでOK。
 
 ### テーマ変更(R2)
 
-`GET /api/theme` は R2 の `theme.json` を優先して返す。UI の配色(`table`, `accent`)だけの
-シンプルな JSON なので、再デプロイなしで差し替え可能:
+`GET /api/theme` は R2 の `theme.json` を優先して返す:
 
 ```bash
 echo '{"id":"dark","name":"Dark","table":"#111827","accent":"#f59e0b"}' \
@@ -68,12 +79,15 @@ echo '{"id":"dark","name":"Dark","table":"#111827","accent":"#f59e0b"}' \
 ## 構成
 
 ```
-worker/index.ts   REST(/api/*) + WSアップグレード中継 + 静的配信
-worker/room.ts    GameRoom DO(状態保持/配信/alarm/D1記録/KV公開)
-src/shared/       型とゲームエンジン純粋関数(クライアント/サーバ共有)
-src/pages/        Home / Game / Rules / Leaderboard
-migrations/       D1スキーマ
-research/         元サイトの解析レポート(rules-detailed.md 等を参照)
+index.html / src/    フロント(Vite → dist/)
+functions/           Pages Functions(/api/*, /ws/* を Worker へ転送)
+worker/index.ts      REST(/api/*) + WSアップグレード中継
+worker/room.ts       GameRoom DO(状態保持/配信/alarm/D1記録/KV公開)
+worker/wrangler.jsonc  Worker 用設定(DO/D1/KV/R2)
+wrangler.jsonc       Pages 用設定(pages_build_output_dir + Service Binding)
+src/shared/          型とゲームエンジン純粋関数(クライアント/サーバ共有)
+migrations/          D1スキーマ
+research/            元サイトの解析レポート(rules-detailed.md 等を参照)
 ```
 
 ## プロトコル(要約)

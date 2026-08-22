@@ -28,6 +28,8 @@ interface GPlayer {
   hand: Card[];
   connected: boolean;
   calledUno: boolean;
+  /** 残り1枚で未宣言(宣言せずに番を終えると+2) */
+  unoPending: boolean;
   host: boolean;
 }
 
@@ -47,7 +49,12 @@ interface Room {
   winner: { id: string; name: string } | null;
   settings: Settings;
   publicRoom: boolean;
+  /** 同じ数字連続プレイの猶予期限(epoch ms)。0=無効 */
+  chainUntil: number;
 }
+
+/** 同じ数字チェーンの猶予時間(ms) */
+const GRACE_MS = 3000;
 
 function newRoom(): Room {
   return {
@@ -66,6 +73,7 @@ function newRoom(): Room {
     winner: null,
     settings: { ...DEFAULT_SETTINGS },
     publicRoom: true,
+    chainUntil: 0,
   };
 }
 
@@ -220,6 +228,7 @@ export class GameRoom extends DurableObject<Env> {
       hand: [],
       connected: true,
       calledUno: false,
+      unoPending: false,
       host: room.players.length === 0,
     };
     room.players.push(p);
@@ -242,6 +251,7 @@ export class GameRoom extends DurableObject<Env> {
     for (const p of r.players) {
       p.hand = r.deck.splice(0, 7);
       p.calledUno = false;
+      p.unoPending = false;
     }
     // 最初のフリップは数字札まで(オリジナルの挙動不明のための規定)
     let first: Card | undefined;
@@ -276,6 +286,16 @@ export class GameRoom extends DurableObject<Env> {
     if (cardIdx < 0) return null;
     const card = p.hand[cardIdx];
 
+    // 同じ数字チェーン猶予中は同数字カードのみ出せる(自分の手番のみ)
+    const inChainGrace =
+      r.chainUntil > Date.now() && isCurrent && r.stack === 0;
+    if (
+      inChainGrace &&
+      !(card.kind === "number" && top?.kind === "number" && card.num === top.num)
+    ) {
+      return null;
+    }
+
     if (r.stack > 0) {
       if (!isCurrent || !canStackOn(card, r.pendingKind)) return null;
     } else if (!isCurrent) {
@@ -295,17 +315,22 @@ export class GameRoom extends DurableObject<Env> {
     delete r.drawnIds[p.id];
 
     let toast: string | null = null;
-    // UNO 宣言漏れペナルティ(残り1枚で未宣言 → +2)
-    if (p.hand.length === 1 && !p.calledUno) {
-      const got = this.drawN(r, p, 2);
-      toast = `${p.name} forgot to call UNO! Drew ${got}.`;
+    // UNO宣言は残り1枚で。フラグを立て、自分の番が終わるまでに宣言がなければペナルティ
+    if (p.hand.length === 1) {
+      p.unoPending = true;
     }
     p.calledUno = false;
 
-    // 手札ゼロでラウンド終了(効果は適用しない)
+    // 手札ゼロ: 最後の1枚を未宣言のまま出したら +2 ペナルティで続行
     if (p.hand.length === 0) {
-      await this.endGame(r, p);
-      return toast ?? `${p.name} wins!`;
+      if (p.unoPending && !p.calledUno) {
+        const got = this.drawN(r, p, 2);
+        p.unoPending = false;
+        toast = `${p.name} forgot to call UNO! Drew ${got}.`;
+      } else {
+        await this.endGame(r, p);
+        return `${p.name} wins!`;
+      }
     }
 
     // Jump In の場合、効果の基準位置をここに移す
@@ -317,18 +342,18 @@ export class GameRoom extends DurableObject<Env> {
     }
     if (r.settings.sevenZero && card.kind === "number" && card.num === 0) {
       this.rotateHands(r);
-      await this.advanceTurn(r, 1);
+      await this.endPlayerTurn(r, 1);
       return "Everyone passed their hands!";
     }
 
     switch (card.kind) {
       case "reverse": {
         r.direction *= -1;
-        await this.advanceTurn(r, r.players.length === 2 ? 2 : 1);
+        await this.endPlayerTurn(r, r.players.length === 2 ? 2 : 1);
         break;
       }
       case "skip": {
-        await this.advanceTurn(r, 2);
+        await this.endPlayerTurn(r, 2);
         break;
       }
       case "draw2":
@@ -337,7 +362,22 @@ export class GameRoom extends DurableObject<Env> {
         if (r.settings.stacking) {
           r.stack += n;
           r.pendingKind = card.kind;
-          await this.advanceTurn(r, 1);
+          await this.endPlayerTurn(r, 1);
+          // スタックできない相手は自動ドロー。できる相手にも3秒の猶予
+          const victim = r.players[r.turn];
+          if (victim && !victim.hand.some((c) => canStackOn(c, r.pendingKind))) {
+            this.drawN(r, victim, r.stack);
+            const took = r.stack;
+            r.stack = 0;
+            r.pendingKind = null;
+            await this.endPlayerTurn(r, 1);
+            toast =
+              (toast ? `${toast} ` : "") +
+              `${victim.name} was forced to draw ${took}.`;
+          } else if (victim) {
+            r.chainUntil = Date.now() + GRACE_MS;
+            await this.ctx.storage.setAlarm(r.chainUntil);
+          }
         } else {
           const victim = this.peekNext(r);
           if (victim) {
@@ -346,12 +386,22 @@ export class GameRoom extends DurableObject<Env> {
               (toast ? `${toast} ` : "") +
               `${victim.name} draws ${got} and is skipped.`;
           }
-          await this.advanceTurn(r, 2);
+          await this.endPlayerTurn(r, 2);
         }
         break;
       }
-      default:
-        await this.advanceTurn(r, 1);
+      default: {
+        // 同じ数字は連続で出せる: 手札に同じ数字が残っていれば3秒の猶予
+        if (
+          card.kind === "number" &&
+          p.hand.some((c) => c.kind === "number" && c.num === card.num)
+        ) {
+          r.chainUntil = Date.now() + GRACE_MS;
+          await this.ctx.storage.setAlarm(r.chainUntil);
+          break;
+        }
+        await this.endPlayerTurn(r, 1);
+      }
     }
     return toast;
   }
@@ -363,13 +413,12 @@ export class GameRoom extends DurableObject<Env> {
     if (r.drawnIds[p.id]) return null;
 
     if (r.stack > 0) {
-      const got = this.drawN(r, p, r.stack);
+      this.drawN(r, p, r.stack);
       const took = r.stack;
       r.stack = 0;
       r.pendingKind = null;
-      await this.advanceTurn(r, 1);
-      void got;
-      return `${p.name} took ${took} cards.`;
+      const pen = await this.endPlayerTurn(r, 1);
+      return pen ? `${pen} (${p.name} took ${took} cards.)` : `${p.name} took ${took} cards.`;
     }
 
     const ids: string[] = [];
@@ -385,7 +434,21 @@ export class GameRoom extends DurableObject<Env> {
       ) &&
       ids.length < DRAW_TO_PLAY_CAP
     );
-    if (ids.length > 0) r.drawnIds[p.id] = ids;
+    if (ids.length > 0) {
+      r.drawnIds[p.id] = ids;
+      // 同じ数字の出せるカードを引いた/持っていた場合、3秒で自動進行
+      const top = r.discard.at(-1);
+      const hasSameNum =
+        top?.kind === "number" &&
+        p.hand.some(
+          (c) =>
+            c.kind === "number" && c.num === top.num && isPlayable(c, top, r.activeColor),
+        );
+      if (hasSameNum) {
+        r.chainUntil = Date.now() + GRACE_MS;
+        await this.ctx.storage.setAlarm(r.chainUntil);
+      }
+    }
     return null;
   }
 
@@ -397,17 +460,17 @@ export class GameRoom extends DurableObject<Env> {
     const forced = this.mustPlay(r, r.players[r.turn], ids);
     if (forced) return null;
     delete r.drawnIds[pid];
-    await this.advanceTurn(r, 1);
-    return null;
+    return this.endPlayerTurn(r, 1);
   }
 
   private async onCallUno(pid: string): Promise<string | null> {
     const r = await this.load();
     const p = r.players.find((x) => x.id === pid);
-    if (!p || r.phase !== "playing" || p.hand.length !== 2 || p.calledUno) {
+    if (!p || r.phase !== "playing" || p.hand.length !== 1 || p.calledUno) {
       return null;
     }
     p.calledUno = true;
+    p.unoPending = false;
     return `${p.name} called UNO!`;
   }
 
@@ -421,8 +484,11 @@ export class GameRoom extends DurableObject<Env> {
     me.hand = target.hand;
     target.hand = tmp;
     r.pickingBy = null;
-    await this.advanceTurn(r, 1);
-    return `${me.name} swapped hands with ${target.name}!`;
+    const pen = await this.endPlayerTurn(r, 1);
+    return (
+      (pen ? pen + " " : "") +
+      `${me.name} swapped hands with ${target.name}!`
+    );
   }
 
   private async onRestart(pid: string): Promise<string | null> {
@@ -432,7 +498,12 @@ export class GameRoom extends DurableObject<Env> {
     const fresh = newRoom();
     fresh.publicRoom = r.publicRoom;
     fresh.settings = r.settings;
-    fresh.players = r.players.map((p) => ({ ...p, hand: [], calledUno: false }));
+    fresh.players = r.players.map((p) => ({
+      ...p,
+      hand: [],
+      calledUno: false,
+      unoPending: false,
+    }));
     this.room = fresh;
     await this.publishLobby(fresh);
     return "Back to the lobby!";
@@ -466,9 +537,27 @@ export class GameRoom extends DurableObject<Env> {
     const p = r.players[r.turn];
     if (!p) return;
 
+    // 猶予切れ: スタック中なら強制ドロー、それ以外は普通にターン進行
+    if (r.chainUntil > 0 && Date.now() >= r.chainUntil) {
+      r.chainUntil = 0;
+      delete r.drawnIds[p.id];
+      if (r.stack > 0 && !r.pickingBy) {
+        toast = (await this.onDraw(p.id)) || `${p.name} was forced to draw.`;
+        await this.save();
+        await this.broadcast(toast ? { t: "toast", text: toast } : undefined);
+        return;
+      }
+      const pen = await this.endPlayerTurn(r, 1);
+      await this.save();
+      await this.broadcast(
+        pen ? { t: "toast", text: pen } : undefined,
+      );
+      return;
+    }
+
     let toast: string | null = null;
     if (!p.connected) {
-      await this.advanceTurn(r, 1);
+      await this.endPlayerTurn(r, 1);
       toast = `${p.name} timed out.`;
     } else if (r.pickingBy === p.id) {
       const others = r.players.filter((x) => x.id !== p.id);
@@ -484,7 +573,8 @@ export class GameRoom extends DurableObject<Env> {
         toast = (await this.onPlay(p.id, playableDrawn, this.commonColor(p))) ?? "";
       } else {
         delete r.drawnIds[p.id];
-        await this.advanceTurn(r, 1);
+        const pen = await this.endPlayerTurn(r, 1);
+        toast = pen ?? toast;
       }
     } else if (r.stack > 0) {
       toast = (await this.onDraw(p.id)) ?? "";
@@ -505,7 +595,8 @@ export class GameRoom extends DurableObject<Env> {
           toast = (await this.onPlay(p.id, playableDrawn, this.commonColor(p))) ?? "";
         } else {
           delete r.drawnIds[p.id];
-          await this.advanceTurn(r, 1);
+          const pen = await this.endPlayerTurn(r, 1);
+          if (pen) toast = pen;
         }
       }
       toast = toast || `${p.name} timed out.`;
@@ -527,7 +618,21 @@ export class GameRoom extends DurableObject<Env> {
     });
   }
 
+  /** 手番プレイヤーの行動が終了 → UNO未宣言ペナルティを判定してからターンを進める */
+  private async endPlayerTurn(r: Room, times: number): Promise<string | null> {
+    const p = r.players[r.turn];
+    let toast: string | null = null;
+    if (p && p.unoPending && !p.calledUno && r.phase === "playing") {
+      const got = this.drawN(r, p, 2);
+      p.unoPending = false;
+      toast = `${p.name} forgot to call UNO! Drew ${got}.`;
+    }
+    await this.advanceTurn(r, times);
+    return toast;
+  }
+
   private async setTurn(r: Room) {
+    r.chainUntil = 0;
     r.turnEndsAt = Date.now() + r.settings.turnSeconds * 1000;
     r.drawnIds = {};
     await this.ctx.storage.setAlarm(r.turnEndsAt);
@@ -664,6 +769,19 @@ export class GameRoom extends DurableObject<Env> {
         ? p.hand.map(() => false)
         : p.hand.map((c) => {
             if (r.stack > 0) return isCurrent && canStackOn(c, r.pendingKind);
+            // 同じ数字チェーン猶予中(ドロー解決前)は同数字のみ
+            if (
+              r.chainUntil > Date.now() &&
+              isCurrent &&
+              !drawn
+            ) {
+              return (
+                c.kind === "number" &&
+                top !== null &&
+                top.kind === "number" &&
+                c.num === top.num
+              );
+            }
             const base = isPlayable(c, top, r.activeColor);
             if (isCurrent) return base;
             return r.settings.jumpIn && jumpInEligible(c, top);
@@ -676,7 +794,7 @@ export class GameRoom extends DurableObject<Env> {
       drawnIds: drawn,
       mustPlay: !!drawn && this.mustPlay(r, p, drawn),
       calledUno: p.calledUno,
-      canCallUno: g.phase === "playing" && p.hand.length === 2 && !p.calledUno,
+      canCallUno: g.phase === "playing" && p.hand.length === 1 && !p.calledUno,
       picking: r.pickingBy === p.id,
     };
   }

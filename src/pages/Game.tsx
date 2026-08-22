@@ -225,7 +225,7 @@ export default function Game({
             </div>
 
             {/* UNOボタン */}
-            {you.canCallUno && (
+            {you.canCallUno && isMyTurn && (
               <Button
                 onClick={() => send({ t: "callUno" })}
                 size="lg"
@@ -260,9 +260,10 @@ export default function Game({
                 )}
               </>
             )}
-            {state.phase === "playing" && isMyTurn && !you.drawnIds && (
-              <Badge>あなたの番です</Badge>
-            )}
+            {state.phase === "playing" &&
+              isMyTurn &&
+              !you.drawnIds &&
+              !you.picking && <Badge>あなたの番です</Badge>}
             {you.picking && (
               <Badge variant="secondary">
                 上のプレイヤーを選んで手札を交換
@@ -276,12 +277,17 @@ export default function Game({
           </div>
 
           {/* 自分の手札 */}
-          <div className="flex min-h-28 items-end justify-center gap-1 overflow-x-auto px-4 pb-4 pt-2">
-            {state.phase === "ended"
-              ? you.cards.map((c) => (
-                  <UnoCard key={c.id} card={c} size="sm" dimmed />
-                ))
-              : you.cards.map((c, i) => {
+          <div className="relative min-h-28 px-4 pb-4 pt-2">
+            <Badge variant="secondary" className="absolute right-4 top-0 tabular-nums">
+              {you.cards.length}枚
+            </Badge>
+            <div className="overflow-x-auto">
+              <div className="mx-auto flex w-max items-end justify-center gap-1">
+                {state.phase === "ended"
+                  ? you.cards.map((c) => (
+                      <UnoCard key={c.id} card={c} size="sm" dimmed />
+                    ))
+                  : you.cards.map((c, i) => {
                   const animIdx = drawnAnim.indexOf(c.id);
                   return (
                     <UnoCard
@@ -299,6 +305,8 @@ export default function Game({
                     />
                   );
                 })}
+              </div>
+            </div>
           </div>
 
           {/* 勝利ダイアログ */}
