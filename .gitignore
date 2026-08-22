@@ -35,3 +35,6 @@ CLAUDE.md
 .cursorrules
 .claude/
 .github/copilot-instructions.md
+
+# Wrangler local dev state
+.wrangler/
