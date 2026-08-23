@@ -195,6 +195,7 @@ export class GameRoom extends DurableObject<Env> {
       }
     }
     await this.save();
+    await this.publishLobby(room);
     await this.broadcast();
   }
 
