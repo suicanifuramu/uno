@@ -81,6 +81,7 @@ const DRAW_TO_PLAY_CAP = 20;
 
 export class GameRoom extends DurableObject<Env> {
   private room: Room | null = null;
+  private lobbyPublished = false;
   private readonly code: string;
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -105,6 +106,7 @@ export class GameRoom extends DurableObject<Env> {
     const r = await this.load();
     r.publicRoom = v;
     await this.save();
+    await this.publishLobby(r);
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -235,6 +237,7 @@ export class GameRoom extends DurableObject<Env> {
     ws.serializeAttachment({ playerId: p.id });
     ws.send(this.m({ t: "init", playerId: p.id, code: this.code }));
     await this.save();
+    await this.publishLobby(room);
     await this.broadcast();
   }
 
@@ -271,6 +274,7 @@ export class GameRoom extends DurableObject<Env> {
     r.phase = "playing";
     r.turn = Math.floor(Math.random() * r.players.length);
     await this.setTurn(r);
+    await this.publishLobby(r);
     return `${r.players[r.turn].name} goes first!`;
   }
 
@@ -541,6 +545,7 @@ export class GameRoom extends DurableObject<Env> {
     if (r.chainUntil > 0 && Date.now() >= r.chainUntil) {
       r.chainUntil = 0;
       delete r.drawnIds[p.id];
+      let toast: string | null;
       if (r.stack > 0 && !r.pickingBy) {
         toast = (await this.onDraw(p.id)) || `${p.name} was forced to draw.`;
         await this.save();
@@ -828,13 +833,15 @@ export class GameRoom extends DurableObject<Env> {
         /* noop */
       }
     }
-    await this.publishLobby(r);
   }
 
+  /** ロビー公開の同期。broadcast ではなくライフサイクル変化時のみ呼ぶこと(KV制限対策) */
   private async publishLobby(r: Room) {
     const key = `room:${this.code}`;
+    const want =
+      r.phase === "lobby" && r.publicRoom && r.players.length > 0;
     try {
-      if (r.phase === "lobby" && r.publicRoom && r.players.length > 0) {
+      if (want) {
         await this.env.KV.put(
           key,
           JSON.stringify({
@@ -844,8 +851,10 @@ export class GameRoom extends DurableObject<Env> {
           }),
           { expirationTtl: 3600 },
         );
-      } else {
+        this.lobbyPublished = true;
+      } else if (this.lobbyPublished) {
         await this.env.KV.delete(key);
+        this.lobbyPublished = false;
       }
     } catch (e) {
       console.error("kv error:", e);
