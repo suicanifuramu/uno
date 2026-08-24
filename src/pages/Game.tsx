@@ -147,7 +147,7 @@ export default function Game({
       {/* ヘッダーバー */}
       <div className="flex items-center gap-2 px-3 py-1">
         <span
-          className="text-lg font-bold"
+          className={`text-lg font-bold ${state.phase === "lobby" ? "invisible" : ""}`}
           aria-label={state.direction === 1 ? "時計回り" : "反時計回り"}
         >
           {state.direction === 1 ? "↻" : "↺"}
@@ -385,6 +385,8 @@ function LobbyView({
   isHost: boolean;
   send: ReturnType<typeof useGameRoom>["send"];
 }) {
+  const selfReady =
+    state.players.find((p) => p.id === state.you.id)?.ready ?? false;
   return (
     <UICard className="mx-auto my-4 w-full max-w-xl">
       <CardHeader className="items-center text-center">
@@ -399,12 +401,7 @@ function LobbyView({
             プレイヤー ({state.players.length}/{state.settings.maxPlayers})
           </p>
           {state.players.map((p) => (
-            <PlayerRow
-              key={p.id}
-              player={p}
-              isSelf={p.id === state.you.id}
-              onReady={(v) => send({ t: "ready", v })}
-            />
+            <PlayerRow key={p.id} player={p} />
           ))}
         </section>
         <Separator />
@@ -448,9 +445,14 @@ function LobbyView({
             ゲーム開始 ({state.players.length}/2人以上)
           </Button>
         ) : (
-          <p className="text-center text-muted-foreground">
-            ホストが開始するのを待っています…
-          </p>
+          <Button
+            size="lg"
+            variant={selfReady ? "default" : "outline"}
+            onClick={() => send({ t: "ready", v: !selfReady })}
+            aria-pressed={selfReady}
+          >
+            {selfReady ? "準備完了 ✓" : "準備する"}
+          </Button>
         )}
         <Button variant="ghost" render={<a href="#/" />}>
             <LogOut data-icon="inline-start" />
@@ -482,15 +484,7 @@ function CodeBox() {
   );
 }
 
-function PlayerRow({
-  player,
-  isSelf,
-  onReady,
-}: {
-  player: PubPlayer;
-  isSelf: boolean;
-  onReady: (v: boolean) => void;
-}) {
+function PlayerRow({ player }: { player: PubPlayer }) {
   return (
     <div className="flex items-center gap-2 rounded-md border px-3 py-1.5">
       <Avatarish name={player.name} />
@@ -501,20 +495,11 @@ function PlayerRow({
           HOST
         </Badge>
       )}
-      <span className="ml-auto">
-        {isSelf && !player.host ? (
-          <Button
-            size="sm"
-            variant={player.ready ? "default" : "outline"}
-            onClick={() => onReady(!player.ready)}
-            aria-pressed={player.ready}
-          >
-            {player.ready ? "準備完了 ✓" : "準備する"}
-          </Button>
-        ) : player.ready ? (
-          <Badge variant="secondary">準備完了</Badge>
-        ) : null}
-      </span>
+      {player.ready && (
+        <Badge variant="secondary" className="ml-auto">
+          準備完了
+        </Badge>
+      )}
     </div>
   );
 }
