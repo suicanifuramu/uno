@@ -31,6 +31,7 @@ interface GPlayer {
   /** 残り1枚で未宣言(宣言せずに番を終えると+2) */
   unoPending: boolean;
   host: boolean;
+  ready: boolean;
 }
 
 interface Room {
@@ -141,6 +142,9 @@ export class GameRoom extends DurableObject<Env> {
       case "start":
         toast = await this.onStart(pid);
         break;
+      case "ready":
+        toast = await this.onReady(pid, msg.v === true);
+        break;
       case "play":
         toast = await this.onPlay(
           pid,
@@ -233,6 +237,7 @@ export class GameRoom extends DurableObject<Env> {
       calledUno: false,
       unoPending: false,
       host: room.players.length === 0,
+      ready: false,
     };
     room.players.push(p);
     ws.serializeAttachment({ playerId: p.id });
@@ -250,12 +255,16 @@ export class GameRoom extends DurableObject<Env> {
     const me = r.players.find((p) => p.id === pid);
     if (!me?.host) return "Only the host can start.";
     if (r.players.length < 2) return "Need at least 2 players.";
+    if (r.players.some((p) => !p.host && !p.ready)) {
+      return "Waiting for all players to ready.";
+    }
 
     r.deck = shuffle(makeDeck());
     for (const p of r.players) {
       p.hand = r.deck.splice(0, 7);
       p.calledUno = false;
       p.unoPending = false;
+      p.ready = false;
     }
     // 最初のフリップは数字札まで(オリジナルの挙動不明のための規定)
     let first: Card | undefined;
@@ -277,6 +286,15 @@ export class GameRoom extends DurableObject<Env> {
     await this.setTurn(r);
     await this.publishLobby(r);
     return `${r.players[r.turn].name} goes first!`;
+  }
+
+  private async onReady(pid: string, v: boolean): Promise<string | null> {
+    const r = await this.load();
+    if (r.phase !== "lobby") return null;
+    const p = r.players.find((x) => x.id === pid);
+    if (!p || p.host) return null;
+    p.ready = v;
+    return null;
   }
 
   private async onPlay(pid: string, cardId: string, color?: Color): Promise<string | null> {
@@ -320,9 +338,9 @@ export class GameRoom extends DurableObject<Env> {
     delete r.drawnIds[p.id];
 
     let toast: string | null = null;
-    // UNO宣言は残り1枚で。フラグを立て、自分の番が終わるまでに宣言がなければペナルティ
+    // UNO宣言は残り2枚で。宣言済みなら残り1枚でペナルティなし。未宣言なら unoPending を立てる
     if (p.hand.length === 1) {
-      p.unoPending = true;
+      if (!p.calledUno) p.unoPending = true;
     }
     p.calledUno = false;
 
@@ -440,6 +458,16 @@ export class GameRoom extends DurableObject<Env> {
       ids.length < DRAW_TO_PLAY_CAP
     );
     if (ids.length > 0) {
+      // drawToPlay オフ: 1枚引いて出せなければ即ターン終了(keep選択を出さない)
+      if (!r.settings.drawToPlay) {
+        const drawn = p.hand.find((x) => x.id === ids[0]);
+        const playable = drawn
+          ? isPlayable(drawn, r.discard.at(-1) ?? null, r.activeColor)
+          : false;
+        if (!playable) {
+          return this.endPlayerTurn(r, 1);
+        }
+      }
       r.drawnIds[p.id] = ids;
       // 同じ数字の出せるカードを引いた/持っていた場合、3秒で自動進行
       const top = r.discard.at(-1);
@@ -471,7 +499,7 @@ export class GameRoom extends DurableObject<Env> {
   private async onCallUno(pid: string): Promise<string | null> {
     const r = await this.load();
     const p = r.players.find((x) => x.id === pid);
-    if (!p || r.phase !== "playing" || p.hand.length !== 1 || p.calledUno) {
+    if (!p || r.phase !== "playing" || p.hand.length !== 2 || p.calledUno) {
       return null;
     }
     p.calledUno = true;
@@ -508,6 +536,7 @@ export class GameRoom extends DurableObject<Env> {
       hand: [],
       calledUno: false,
       unoPending: false,
+      ready: false,
     }));
     this.room = fresh;
     await this.publishLobby(fresh);
@@ -749,6 +778,7 @@ export class GameRoom extends DurableObject<Env> {
       connected: p.connected,
       host: p.host,
       calledUno: p.calledUno,
+      ready: p.ready,
     }));
   }
 
@@ -800,7 +830,7 @@ export class GameRoom extends DurableObject<Env> {
       drawnIds: drawn,
       mustPlay: !!drawn && this.mustPlay(r, p, drawn),
       calledUno: p.calledUno,
-      canCallUno: g.phase === "playing" && p.hand.length === 1 && !p.calledUno,
+      canCallUno: g.phase === "playing" && p.hand.length === 2 && !p.calledUno,
       picking: r.pickingBy === p.id,
     };
   }

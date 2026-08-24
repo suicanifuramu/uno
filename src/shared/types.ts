@@ -36,7 +36,7 @@ export const DEFAULT_RULES: Rules = {
 export const DEFAULT_SETTINGS: Settings = {
   ...DEFAULT_RULES,
   maxPlayers: 8,
-  turnSeconds: 30,
+  turnSeconds: 15,
 };
 
 /** 全プレイヤーに見える状態 */
@@ -47,6 +47,7 @@ export interface PubPlayer {
   connected: boolean;
   host: boolean;
   calledUno: boolean;
+  ready: boolean;
 }
 
 /** 接続者自身にのみ見える状態 */
@@ -92,6 +93,7 @@ export interface StateSnapshot extends GameState {
 export type ClientMsg =
   | { t: "join"; name: string; playerId?: string }
   | { t: "start" }
+  | { t: "ready"; v: boolean }
   | { t: "play"; cardId: string; color?: Color }
   | { t: "draw" }
   | { t: "keep" }

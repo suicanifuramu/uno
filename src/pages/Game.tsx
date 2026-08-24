@@ -22,11 +22,10 @@ import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
-import { Status, StatusIndicator, StatusLabel } from "@/components/ui/status";
 import { Switch } from "@/components/ui/switch";
 import { ActiveColorDot, UnoCard } from "@/components/game/UnoCard";
 import type { Card } from "@/shared/types";
-import { getName, setName, useGameRoom, useTick } from "@/lib/client";
+import { getName, setName, playChime, useGameRoom, useTick } from "@/lib/client";
 import type { Color, PubPlayer, StateSnapshot } from "@/shared/types";
 
 const RULE_TOGGLES = [
@@ -55,7 +54,7 @@ export default function Game({
   onPhaseChange?: (phase: "lobby" | "playing" | "ended" | null) => void;
 }) {
   const [joined, setJoined] = useState(() => !!getName());
-  const { state, connected, chat, send } = useGameRoom(code, {
+  const { state, chat, send } = useGameRoom(code, {
     enabled: joined,
   });
   const now = useTick(250);
@@ -94,6 +93,19 @@ export default function Game({
     return () => onPhaseChange?.(null);
   }, [state?.phase, onPhaseChange]);
 
+  // 自分の手番に移った瞬間に効果音
+  const wasMyTurnRef = useRef(false);
+  const myTurnNow =
+    state?.phase === "playing" &&
+    state.turn >= 0 &&
+    state.players[state.turn]?.id === state.you.id;
+  useEffect(() => {
+    if (myTurnNow && !wasMyTurnRef.current) {
+      playChime();
+    }
+    wasMyTurnRef.current = !!myTurnNow;
+  }, [myTurnNow]);
+
   // 名前未設定で URL 直打ちされた場合 → 名前入力画面を出してから接続
   if (!joined) {
     return <NameGate onJoin={() => setJoined(true)} />;
@@ -109,7 +121,6 @@ export default function Game({
 
   const you = state.you;
   const me = state.players.find((p) => p.id === you.id);
-  const others = state.players.filter((p) => p.id !== you.id);
   const current = state.turn >= 0 ? state.players[state.turn] : undefined;
   const isMyTurn = current?.id === you.id;
   const isHost = !!me?.host;
@@ -135,10 +146,12 @@ export default function Game({
     <div className="relative flex h-[calc(100dvh-3.5rem)] flex-col overflow-hidden">
       {/* ヘッダーバー */}
       <div className="flex items-center gap-2 px-3 py-1">
-        <Status variant={connected ? "success" : "error"}>
-          <StatusIndicator />
-          <StatusLabel>{connected ? "接続中" : "切断 - 再読込してください"}</StatusLabel>
-        </Status>
+        <span
+          className="text-lg font-bold"
+          aria-label={state.direction === 1 ? "時計回り" : "反時計回り"}
+        >
+          {state.direction === 1 ? "↻" : "↺"}
+        </span>
         <span className="ml-auto font-mono text-sm font-bold tracking-widest">
           {code}
         </span>
@@ -167,12 +180,13 @@ export default function Game({
           <LobbyView state={state} isHost={isHost} send={send} />
         ) : (
         <>
-          {/* 対戦相手 */}
+          {/* プレイヤー一覧(自分含む) */}
           <div className="flex flex-wrap items-start justify-center gap-3 px-4 py-2">
-            {others.map((p) => (
+            {state.players.map((p, i) => (
               <OpponentSeat
                 key={p.id}
                 player={p}
+                seat={i + 1}
                 active={state.phase === "playing" && current?.id === p.id}
                 timerPct={
                   state.phase === "playing" && current?.id === p.id
@@ -183,7 +197,7 @@ export default function Game({
                 onPick={() => send({ t: "pickHand", targetId: p.id })}
               />
             ))}
-            {others.length === 0 && (
+            {state.players.length === 0 && (
               <p className="text-muted-foreground">他のプレイヤーを待機中…</p>
             )}
           </div>
@@ -385,7 +399,12 @@ function LobbyView({
             プレイヤー ({state.players.length}/{state.settings.maxPlayers})
           </p>
           {state.players.map((p) => (
-            <PlayerRow key={p.id} player={p} />
+            <PlayerRow
+              key={p.id}
+              player={p}
+              isSelf={p.id === state.you.id}
+              onReady={(v) => send({ t: "ready", v })}
+            />
           ))}
         </section>
         <Separator />
@@ -420,7 +439,10 @@ function LobbyView({
         {isHost ? (
           <Button
             size="lg"
-            disabled={state.players.length < 2}
+            disabled={
+              state.players.length < 2 ||
+              state.players.some((p) => !p.host && !p.ready)
+            }
             onClick={() => send({ t: "start" })}
           >
             ゲーム開始 ({state.players.length}/2人以上)
@@ -460,7 +482,15 @@ function CodeBox() {
   );
 }
 
-function PlayerRow({ player }: { player: PubPlayer }) {
+function PlayerRow({
+  player,
+  isSelf,
+  onReady,
+}: {
+  player: PubPlayer;
+  isSelf: boolean;
+  onReady: (v: boolean) => void;
+}) {
   return (
     <div className="flex items-center gap-2 rounded-md border px-3 py-1.5">
       <Avatarish name={player.name} />
@@ -471,10 +501,20 @@ function PlayerRow({ player }: { player: PubPlayer }) {
           HOST
         </Badge>
       )}
-      <Status variant={player.connected ? "success" : "error"} className="ml-auto">
-        <StatusIndicator />
-        <StatusLabel>{player.connected ? "ONLINE" : "OFFLINE"}</StatusLabel>
-      </Status>
+      <span className="ml-auto">
+        {isSelf && !player.host ? (
+          <Button
+            size="sm"
+            variant={player.ready ? "default" : "outline"}
+            onClick={() => onReady(!player.ready)}
+            aria-pressed={player.ready}
+          >
+            {player.ready ? "準備完了 ✓" : "準備する"}
+          </Button>
+        ) : player.ready ? (
+          <Badge variant="secondary">準備完了</Badge>
+        ) : null}
+      </span>
     </div>
   );
 }
@@ -483,12 +523,14 @@ function PlayerRow({ player }: { player: PubPlayer }) {
 
 function OpponentSeat({
   player,
+  seat,
   active,
   timerPct,
   pickingMode,
   onPick,
 }: {
   player: PubPlayer;
+  seat: number;
   active: boolean;
   timerPct: number | null;
   pickingMode: boolean;
@@ -496,6 +538,9 @@ function OpponentSeat({
 }) {
   const body = (
     <>
+      <span className="text-xs font-bold text-muted-foreground tabular-nums">
+        {seat}
+      </span>
       <Avatarish name={player.name} large active={active} />
       <span className="max-w-full truncate text-sm font-semibold">{player.name}</span>
       <Badge variant="secondary">{player.count}枚</Badge>
@@ -557,7 +602,7 @@ function ChatPanel({
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   return (
-    <div className="absolute left-4 bottom-4 flex flex-col items-start gap-2">
+    <div className="absolute left-4 bottom-4 z-20 flex flex-col items-start gap-2">
       {open && (
         <div className="flex h-56 w-72 flex-col rounded-lg border bg-card p-2 shadow-lg">
           <div className="flex-1 space-y-1 overflow-y-auto pr-1 text-sm">
