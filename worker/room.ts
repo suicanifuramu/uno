@@ -181,6 +181,8 @@ export class GameRoom extends DurableObject<Env> {
       default:
         return;
     }
+    const dToast = await this.resolveDisconnected(room);
+    if (dToast) toast = toast ? `${toast} ${dToast}` : dToast;
     await this.save();
     await this.broadcast(toast ? { t: "toast", text: toast } : undefined);
   }
@@ -200,7 +202,13 @@ export class GameRoom extends DurableObject<Env> {
     }
     await this.save();
     await this.publishLobby(room);
-    await this.broadcast();
+    if (room.phase === "playing" && room.players[room.turn]?.id === p.id) {
+      const dToast = await this.resolveDisconnected(room);
+      await this.save();
+      await this.broadcast(dToast ? { t: "toast", text: dToast } : undefined);
+    } else {
+      await this.broadcast();
+    }
   }
 
   private async handleJoin(ws: WebSocket, room: Room, msg: Record<string, unknown>) {
@@ -282,9 +290,10 @@ export class GameRoom extends DurableObject<Env> {
     r.drawnIds = {};
     r.winner = null;
     r.phase = "playing";
-    r.turn = Math.floor(Math.random() * r.players.length);
+    r.turn = 0;
     await this.setTurn(r);
     await this.publishLobby(r);
+    await this.resolveDisconnected(r);
     return `${r.players[r.turn].name} goes first!`;
   }
 
@@ -636,6 +645,8 @@ export class GameRoom extends DurableObject<Env> {
       }
       toast = toast || `${p.name} timed out.`;
     }
+    const dToast = await this.resolveDisconnected(r);
+    if (dToast) toast = toast ? `${toast} ${dToast}` : dToast;
     await this.save();
     await this.broadcast({
       t: "toast",
@@ -681,6 +692,70 @@ export class GameRoom extends DurableObject<Env> {
     }
     r.turn = i;
     await this.setTurn(r);
+  }
+
+  /** 切断プレイヤーの手番を1アクション自動解決する。切断者でなければ null */
+  private async autoResolve(r: Room, p: GPlayer): Promise<string | null> {
+    // 7で交換待ち → ランダムな相手を自動選択
+    if (r.pickingBy === p.id) {
+      const others = r.players.filter((x) => x.id !== p.id);
+      const target = others[Math.floor(Math.random() * others.length)];
+      if (!target) return null;
+      return (await this.onPickHand(p.id, target.id)) ?? "";
+    }
+    // ドロー後判定中: 出せるなら出す、出せなければターン終了
+    if (r.drawnIds[p.id]) {
+      const ids = r.drawnIds[p.id]!;
+      const top = r.discard.at(-1) ?? null;
+      const playableDrawn = ids.find((id) => {
+        const c = p.hand.find((x) => x.id === id)!;
+        return isPlayable(c, top, r.activeColor);
+      });
+      if (playableDrawn) {
+        return (await this.onPlay(p.id, playableDrawn, this.commonColor(p))) ?? "";
+      }
+      delete r.drawnIds[p.id];
+      return this.endPlayerTurn(r, 1);
+    }
+    // スタック中: スタックできるなら即スタック、できなければ即ドロー
+    if (r.stack > 0) {
+      const stackable = p.hand.find((c) => canStackOn(c, r.pendingKind));
+      if (stackable) {
+        return (await this.onPlay(p.id, stackable.id, this.commonColor(p))) ?? "";
+      }
+      return this.onDraw(p.id);
+    }
+    // 通常: 出せるカード(同数字チェーン猶予中は同数字のみ)
+    const top = r.discard.at(-1) ?? null;
+    const inChain = r.chainUntil > Date.now() && r.stack === 0;
+    const playable = p.hand.find((c) => {
+      if (inChain) {
+        return (
+          c.kind === "number" &&
+          top?.kind === "number" &&
+          c.num === top.num
+        );
+      }
+      return isPlayable(c, top, r.activeColor);
+    });
+    if (playable) {
+      return (await this.onPlay(p.id, playable.id, this.commonColor(p))) ?? "";
+    }
+    // 出せない → ドロー
+    return this.onDraw(p.id);
+  }
+
+  /** 現在の手番が切断中なら自動解決を続ける。toast を連結して返す */
+  private async resolveDisconnected(r: Room): Promise<string | null> {
+    let toast: string | null = null;
+    let guard = 0;
+    while (r.phase === "playing" && guard++ < r.players.length) {
+      const p = r.players[r.turn];
+      if (!p || p.connected) break;
+      const t = await this.autoResolve(r, p);
+      if (t) toast = toast ? `${toast} ${t}` : t;
+    }
+    return toast;
   }
 
   private peekNext(r: Room): GPlayer | undefined {

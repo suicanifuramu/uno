@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  ArrowDown,
-  ArrowUp,
   Copy,
   Crown,
+  GlobeX,
   LogOut,
   MessageCircle,
   RotateCcw,
+  RotateCw,
   Send,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -150,7 +150,11 @@ export default function Game({
           className={`text-lg font-bold ${state.phase === "lobby" ? "invisible" : ""}`}
           aria-label={state.direction === 1 ? "時計回り" : "反時計回り"}
         >
-          {state.direction === 1 ? "↻" : "↺"}
+          {state.direction === 1 ? (
+            <RotateCw className="size-5" />
+          ) : (
+            <RotateCcw className="size-5" />
+          )}
         </span>
         <span className="ml-auto font-mono text-sm font-bold tracking-widest">
           {code}
@@ -225,13 +229,6 @@ export default function Game({
               )}
               <div className="flex items-center gap-2">
                 <ActiveColorDot color={state.activeColor} />
-                <span className="text-muted-foreground text-xs">
-                  {state.direction === 1 ? (
-                    <ArrowUp className="size-4" aria-label="時計回り" />
-                  ) : (
-                    <ArrowDown className="size-4" aria-label="反時計回り" />
-                  )}
-                </span>
                 {state.stack > 0 && (
                   <Badge variant="destructive">スタック +{state.stack}</Badge>
                 )}
@@ -295,7 +292,7 @@ export default function Game({
             <Badge variant="secondary" className="absolute right-4 top-0 tabular-nums">
               {you.cards.length}枚
             </Badge>
-            <div className="overflow-x-auto">
+            <div className="overflow-x-auto pt-2">
               <div className="mx-auto flex w-max items-end justify-center gap-1">
                 {state.phase === "ended"
                   ? you.cards.map((c) => (
@@ -530,6 +527,15 @@ function OpponentSeat({
       <span className="max-w-full truncate text-sm font-semibold">{player.name}</span>
       <Badge variant="secondary">{player.count}枚</Badge>
       {player.calledUno && <Badge variant="destructive">UNO!</Badge>}
+      {!player.connected && (
+        <span
+          className="flex items-center gap-1 text-muted-foreground text-xs"
+          aria-label="切断中"
+        >
+          <GlobeX className="size-4" />
+          切断
+        </span>
+      )}
       {timerPct !== null && (
         <Progress value={timerPct} className="h-1.5 w-full" aria-hidden />
       )}
