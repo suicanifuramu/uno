@@ -249,7 +249,7 @@ function CardPreview({ color, label }: { color: string; label: string }) {
       className={`grid h-20 w-14 place-items-center rotate-[-8deg] rounded-lg border-4 border-white text-xl font-black italic text-white shadow-md ${color === "conic" ? "bg-[conic-gradient(from_180deg,#e7000b_0deg,#14b8a6_90deg,#f59e0b_180deg,#2563eb_270deg,#e7000b_360deg)]" : color}`}
     >
       <span className="absolute inset-[12%] -rotate-[20deg] rounded-full bg-white/95" />
-      <span className="relative z-10 not-italic">{label}</span>
+      <span className="relative z-10 not-italic text-neutral-900">{label}</span>
     </span>
   );
 }
