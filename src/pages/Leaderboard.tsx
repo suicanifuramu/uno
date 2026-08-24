@@ -53,11 +53,11 @@ export default function Leaderboard() {
               <TableRow key={r.name}>
                 <TableCell>
                   {i === 0 ? (
-                    <Badge>🥇 1位</Badge>
+                    <Badge>1位</Badge>
                   ) : i === 1 ? (
-                    <Badge variant="secondary">🥈 2位</Badge>
+                    <Badge variant="secondary">2位</Badge>
                   ) : i === 2 ? (
-                    <Badge variant="outline">🥉 3位</Badge>
+                    <Badge variant="outline">3位</Badge>
                   ) : (
                     `${i + 1}位`
                   )}

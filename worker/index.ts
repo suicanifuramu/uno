@@ -8,6 +8,7 @@ interface PublicRoomInfo {
   code: string;
   count: number;
   max: number;
+  phase: "lobby" | "playing";
 }
 
 /** UI テーマ(R2 に無ければこれを使う)。/api/theme 経由で配信 */

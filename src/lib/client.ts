@@ -39,6 +39,7 @@ export interface PublicRoomInfo {
   code: string;
   count: number;
   max: number;
+  phase: "lobby" | "playing";
 }
 
 export const fetchPublicRooms = () =>
@@ -60,6 +61,7 @@ export interface ChatEntry {
 export function useGameRoom(code: string, opts?: { enabled?: boolean }) {
   const [state, setState] = useState<StateSnapshot | null>(null);
   const [connected, setConnected] = useState(false);
+  const [replaced, setReplaced] = useState(false);
   const [chat, setChat] = useState<ChatEntry[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
   const enabled = opts?.enabled ?? true;
@@ -82,15 +84,23 @@ export function useGameRoom(code: string, opts?: { enabled?: boolean }) {
         }),
       );
     };
-    socket.onclose = () => {
-      if (!disposed) setConnected(false);
+    socket.onclose = (ev) => {
+      if (disposed) return;
+      if (ev.code === 4001) {
+        setReplaced(true);
+        setConnected(false);
+        return;
+      }
+      setConnected(false);
     };
     socket.onmessage = (ev) => {
       if (disposed) return;
       const msg = JSON.parse(String(ev.data)) as ServerMsg;
       switch (msg.t) {
         case "init":
-          localStorage.setItem(`uno:p:${code}`, msg.playerId);
+          if (!msg.spectator) {
+            localStorage.setItem(`uno:p:${code}`, msg.playerId);
+          }
           break;
         case "state":
           setState(msg.s);
@@ -114,7 +124,7 @@ export function useGameRoom(code: string, opts?: { enabled?: boolean }) {
     wsRef.current?.send(JSON.stringify(msg));
   }, []);
 
-  return { state, connected, chat, send };
+  return { state, connected, replaced, chat, send };
 }
 
 /** 指定間隔で Date.now() を返す(タイマー表示用) */

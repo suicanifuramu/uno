@@ -54,7 +54,7 @@ export default function Game({
   onPhaseChange?: (phase: "lobby" | "playing" | "ended" | null) => void;
 }) {
   const [joined, setJoined] = useState(() => !!getName());
-  const { state, chat, send } = useGameRoom(code, {
+  const { state, replaced, chat, send } = useGameRoom(code, {
     enabled: joined,
   });
   const now = useTick(250);
@@ -111,6 +111,27 @@ export default function Game({
     return <NameGate onJoin={() => setJoined(true)} />;
   }
 
+  // 別タブで同じプレイヤーに接続し直された → この画面は古い
+  if (replaced) {
+    return (
+      <div className="grid h-[calc(100dvh-3.5rem)] place-items-center p-4">
+        <UICard className="w-full max-w-sm">
+          <CardHeader>
+            <CardTitle>この画面は置き換えられました</CardTitle>
+            <CardDescription>
+              別のタブや端末で同じプレイヤーとして接続されたため、この画面での接続は終了しました。
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button size="lg" className="w-full" render={<a href="#/" />}>
+              ホームに戻る
+            </Button>
+          </CardContent>
+        </UICard>
+      </div>
+    );
+  }
+
   if (!state) {
     return (
       <div className="grid h-[calc(100dvh-3.5rem)] place-items-center">
@@ -156,6 +177,7 @@ export default function Game({
             <RotateCcw className="size-5" />
           )}
         </span>
+        {state.spectator && <Badge variant="secondary">観戦中</Badge>}
         <span className="ml-auto font-mono text-sm font-bold tracking-widest">
           {code}
         </span>
@@ -191,6 +213,7 @@ export default function Game({
                 key={p.id}
                 player={p}
                 seat={i + 1}
+                isSelf={p.id === you.id}
                 active={state.phase === "playing" && current?.id === p.id}
                 timerPct={
                   state.phase === "playing" && current?.id === p.id
@@ -236,7 +259,7 @@ export default function Game({
             </div>
 
             {/* UNOボタン */}
-            {you.canCallUno && isMyTurn && (
+            {!state.spectator && you.canCallUno && isMyTurn && (
               <Button
                 onClick={() => send({ t: "callUno" })}
                 size="lg"
@@ -256,6 +279,7 @@ export default function Game({
           </div>
 
           {/* ドロー後の選択 / 手番表示 */}
+          {!state.spectator && (
           <div className="flex h-10 items-center justify-center gap-3 px-4">
             {state.phase === "playing" && isMyTurn && you.drawnIds && (
               <>
@@ -286,8 +310,10 @@ export default function Game({
               </span>
             )}
           </div>
+          )}
 
           {/* 自分の手札 */}
+          {!state.spectator && (
           <div className="relative min-h-28 px-4 pb-4 pt-2">
             <Badge variant="secondary" className="absolute right-4 top-0 tabular-nums">
               {you.cards.length}枚
@@ -319,13 +345,26 @@ export default function Game({
               </div>
             </div>
           </div>
+          )}
 
           {/* 勝利ダイアログ */}
           <Dialog open={state.phase === "ended"}>
             <DialogContent>
               <DialogTitle className="text-center text-3xl font-extrabold">
-                🎉 {state.winner?.name ?? "?"} の勝ち!
+                🎉 ゲーム終了!
               </DialogTitle>
+              <div className="mt-2 flex flex-col gap-1">
+                {state.rankings.map((r) => (
+                  <div
+                    key={r.id}
+                    className="flex items-center justify-between rounded-md border px-3 py-1.5"
+                  >
+                    <span className="font-bold tabular-nums">{r.rank}位</span>
+                    <span className="truncate font-medium">{r.name}</span>
+                    <span className="w-8" />
+                  </div>
+                ))}
+              </div>
               <div className="mt-4 flex flex-col gap-3">
                 {isHost && (
                   <Button size="lg" onClick={() => send({ t: "restart" })}>
@@ -506,6 +545,7 @@ function PlayerRow({ player }: { player: PubPlayer }) {
 function OpponentSeat({
   player,
   seat,
+  isSelf,
   active,
   timerPct,
   pickingMode,
@@ -513,6 +553,7 @@ function OpponentSeat({
 }: {
   player: PubPlayer;
   seat: number;
+  isSelf: boolean;
   active: boolean;
   timerPct: number | null;
   pickingMode: boolean;
@@ -521,11 +562,12 @@ function OpponentSeat({
   const body = (
     <>
       <span className="text-xs font-bold text-muted-foreground tabular-nums">
-        {seat}
+        {isSelf ? "あなた" : seat}
       </span>
       <Avatarish name={player.name} large active={active} />
       <span className="max-w-full truncate text-sm font-semibold">{player.name}</span>
       <Badge variant="secondary">{player.count}枚</Badge>
+      {player.rank != null && <Badge variant="outline">{player.rank}位</Badge>}
       {player.calledUno && <Badge variant="destructive">UNO!</Badge>}
       {!player.connected && (
         <span

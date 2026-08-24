@@ -191,7 +191,7 @@ export default function Home() {
         <CardHeader className="flex-row items-center justify-between space-y-0">
           <div>
             <CardTitle>公開中の部屋</CardTitle>
-            <CardDescription>ロビーで待機中の部屋</CardDescription>
+            <CardDescription>待機中の部屋は参加、ゲーム中は観戦できます</CardDescription>
           </div>
           <Button variant="ghost" size="icon" onClick={refreshRooms} aria-label="更新">
             <RefreshCw />
@@ -211,7 +211,7 @@ export default function Home() {
             >
               <Status variant="success">
                 <StatusIndicator />
-                <StatusLabel>待機中</StatusLabel>
+                <StatusLabel>{r.phase === "lobby" ? "待機中" : "ゲーム中"}</StatusLabel>
               </Status>
               <span className="font-mono text-lg font-bold tracking-widest">
                 {r.code}
@@ -221,7 +221,7 @@ export default function Home() {
                 {r.count}/{r.max}
               </Badge>
               <Button size="sm" onClick={() => goGame(r.code)}>
-                参加
+                {r.phase === "lobby" ? "参加" : "観戦"}
               </Button>
             </div>
           ))}

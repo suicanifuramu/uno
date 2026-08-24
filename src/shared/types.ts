@@ -48,6 +48,8 @@ export interface PubPlayer {
   host: boolean;
   calledUno: boolean;
   ready: boolean;
+  /** 終了した順位。null = 対戦中 */
+  rank: number | null;
 }
 
 /** 接続者自身にのみ見える状態 */
@@ -79,13 +81,16 @@ export interface GameState {
   turnEndsAt: number;
   /** スタッキング中の罰札枚数 */
   stack: number;
-  winner: { id: string; name: string } | null;
+  /** 順位一覧(rank 昇順)。空ならまだ順位未確定 */
+  rankings: { id: string; name: string; rank: number }[];
   settings: Settings;
 }
 
 /** サーバ→クライアントの state メッセージ本体 */
 export interface StateSnapshot extends GameState {
   you: YouView;
+  /** 観戦者かどうか */
+  spectator: boolean;
 }
 
 // ---- WebSocket メッセージ ----
@@ -104,7 +109,7 @@ export type ClientMsg =
   | { t: "settings"; patch: Partial<Settings> };
 
 export type ServerMsg =
-  | { t: "init"; playerId: string; code: string }
+  | { t: "init"; playerId: string; code: string; spectator?: boolean }
   | { t: "state"; s: StateSnapshot }
   | { t: "toast"; text: string }
   | { t: "chat"; name: string; text: string };

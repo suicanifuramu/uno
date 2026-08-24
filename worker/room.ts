@@ -32,6 +32,8 @@ interface GPlayer {
   unoPending: boolean;
   host: boolean;
   ready: boolean;
+  /** 終了した順位。null = 対戦中 */
+  rank: number | null;
 }
 
 interface Room {
@@ -47,7 +49,7 @@ interface Room {
   pendingKind: Kind | null; // "draw2" | "wild4"
   drawnIds: Record<string, string[] | undefined>; // ドロー後の Keep/Play 判定
   pickingBy: string | null; // seven0 の7で交換相手選択中のプレイヤー
-  winner: { id: string; name: string } | null;
+  rankings: { id: string; name: string; rank: number }[];
   settings: Settings;
   publicRoom: boolean;
   /** 同じ数字連続プレイの猶予期限(epoch ms)。0=無効 */
@@ -71,7 +73,7 @@ function newRoom(): Room {
     pendingKind: null,
     drawnIds: {},
     pickingBy: null,
-    winner: null,
+    rankings: [],
     settings: { ...DEFAULT_SETTINGS },
     publicRoom: true,
     chainUntil: 0,
@@ -173,7 +175,10 @@ export class GameRoom extends DurableObject<Env> {
       case "chat": {
         const text = String(msg.text ?? "").slice(0, 200);
         if (!text) return;
-        const sender = room.players.find((p) => p.id === pid)?.name ?? "?";
+        const attAny = att as { spectator?: boolean; name?: string };
+        const sender = attAny.spectator
+          ? attAny.name || "観戦者"
+          : room.players.find((p) => p.id === pid)?.name ?? "?";
         await this.save();
         await this.broadcast({ t: "chat", name: sender, text });
         return;
@@ -189,9 +194,19 @@ export class GameRoom extends DurableObject<Env> {
 
   override async webSocketClose(ws: WebSocket) {
     const room = await this.load();
-    const att = (ws.deserializeAttachment() as { playerId?: string });
+    const att = (ws.deserializeAttachment() as {
+      playerId?: string;
+      spectator?: boolean;
+    });
     const p = room.players.find((x) => x.id === att?.playerId);
     if (!p) return;
+    // タブ複製: 同じ playerId の別ソケットがまだ生きていれば切断扱いにしない
+    const stillConnected = this.ctx.getWebSockets().some((s) => {
+      if (s === ws) return false;
+      const a = s.deserializeAttachment() as { playerId?: string };
+      return a?.playerId === p.id;
+    });
+    if (stillConnected) return;
     p.connected = false;
     if (room.phase === "lobby") {
       // ロビーでは離脱=削除。ホストがいなくなったら先頭が繰り上がり
@@ -202,6 +217,12 @@ export class GameRoom extends DurableObject<Env> {
     }
     await this.save();
     await this.publishLobby(room);
+    // 全員切断なら部屋を削除
+    const anyConnected = room.players.some((x) => x.connected);
+    if (!anyConnected) {
+      await this.deleteRoom(room);
+      return;
+    }
     if (room.phase === "playing" && room.players[room.turn]?.id === p.id) {
       const dToast = await this.resolveDisconnected(room);
       await this.save();
@@ -218,12 +239,33 @@ export class GameRoom extends DurableObject<Env> {
       ? room.players.find((p) => p.id === prevId)
       : undefined;
 
+    // 観戦: 対戦中/終了後の部屋へはプレイヤーとして入らず観戦扱い
+    if (!prev && room.phase !== "lobby") {
+      ws.serializeAttachment({ spectator: true, name: rawName });
+      ws.send(this.m({ t: "init", playerId: "", code: this.code, spectator: true }));
+      await this.save();
+      await this.broadcast();
+      return;
+    }
+
     if (prev) {
       // 再接続
       prev.connected = true;
       prev.name = rawName;
       ws.serializeAttachment({ playerId: prev.id });
       ws.send(this.m({ t: "init", playerId: prev.id, code: this.code }));
+      // タブ複製対策: 同じ playerId の古い接続を閉じる
+      for (const s of this.ctx.getWebSockets()) {
+        if (s === ws) continue;
+        const a = s.deserializeAttachment() as { playerId?: string };
+        if (a?.playerId === prev.id) {
+          try {
+            s.close(4001, "replaced");
+          } catch {
+            /* noop */
+          }
+        }
+      }
       await this.save();
       await this.broadcast({ t: "toast", text: `${prev.name} rejoined.` });
       return;
@@ -246,6 +288,7 @@ export class GameRoom extends DurableObject<Env> {
       unoPending: false,
       host: room.players.length === 0,
       ready: false,
+      rank: null,
     };
     room.players.push(p);
     ws.serializeAttachment({ playerId: p.id });
@@ -273,6 +316,7 @@ export class GameRoom extends DurableObject<Env> {
       p.calledUno = false;
       p.unoPending = false;
       p.ready = false;
+      p.rank = null;
     }
     // 最初のフリップは数字札まで(オリジナルの挙動不明のための規定)
     let first: Card | undefined;
@@ -288,7 +332,7 @@ export class GameRoom extends DurableObject<Env> {
     r.pendingKind = null;
     r.pickingBy = null;
     r.drawnIds = {};
-    r.winner = null;
+    r.rankings = [];
     r.phase = "playing";
     r.turn = 0;
     await this.setTurn(r);
@@ -360,8 +404,8 @@ export class GameRoom extends DurableObject<Env> {
         p.unoPending = false;
         toast = `${p.name} forgot to call UNO! Drew ${got}.`;
       } else {
-        await this.endGame(r, p);
-        return `${p.name} wins!`;
+        await this.finishPlayer(r, p);
+        return `${p.name} finished!`;
       }
     }
 
@@ -395,14 +439,10 @@ export class GameRoom extends DurableObject<Env> {
           r.stack += n;
           r.pendingKind = card.kind;
           await this.endPlayerTurn(r, 1);
-          // スタックできない相手は自動ドロー。できる相手にも3秒の猶予
+          // スタックできない相手は自動ドロー後、プレイ可能。できる相手には3秒の猶予
           const victim = r.players[r.turn];
           if (victim && !victim.hand.some((c) => canStackOn(c, r.pendingKind))) {
-            this.drawN(r, victim, r.stack);
-            const took = r.stack;
-            r.stack = 0;
-            r.pendingKind = null;
-            await this.endPlayerTurn(r, 1);
+            const took = this.drawStack(r, victim);
             toast =
               (toast ? `${toast} ` : "") +
               `${victim.name} was forced to draw ${took}.`;
@@ -445,12 +485,8 @@ export class GameRoom extends DurableObject<Env> {
     if (r.drawnIds[p.id]) return null;
 
     if (r.stack > 0) {
-      this.drawN(r, p, r.stack);
-      const took = r.stack;
-      r.stack = 0;
-      r.pendingKind = null;
-      const pen = await this.endPlayerTurn(r, 1);
-      return pen ? `${pen} (${p.name} took ${took} cards.)` : `${p.name} took ${took} cards.`;
+      const took = this.drawStack(r, p);
+      return `${p.name} took ${took} cards.`;
     }
 
     const ids: string[] = [];
@@ -546,6 +582,7 @@ export class GameRoom extends DurableObject<Env> {
       calledUno: false,
       unoPending: false,
       ready: false,
+      rank: null,
     }));
     this.room = fresh;
     await this.publishLobby(fresh);
@@ -688,10 +725,21 @@ export class GameRoom extends DurableObject<Env> {
     if (r.players.length === 0) return;
     let i = r.turn < 0 ? 0 : r.turn;
     for (let n = 0; n < times; n++) {
-      i = (i + r.direction + r.players.length) % r.players.length;
+      i = this.nextActiveIndex(r, i);
     }
     r.turn = i;
     await this.setTurn(r);
+  }
+
+  /** 現在 index から進行方向へ、次の未終了プレイヤーの index を返す */
+  private nextActiveIndex(r: Room, from: number): number {
+    const n = r.players.length;
+    let i = from;
+    for (let k = 0; k < n; k++) {
+      i = (i + r.direction + n) % n;
+      if (r.players[i].rank == null) return i;
+    }
+    return from;
   }
 
   /** 切断プレイヤーの手番を1アクション自動解決する。切断者でなければ null */
@@ -759,8 +807,7 @@ export class GameRoom extends DurableObject<Env> {
   }
 
   private peekNext(r: Room): GPlayer | undefined {
-    const i = (r.turn + r.direction + r.players.length) % r.players.length;
-    return r.players[i];
+    return r.players[this.nextActiveIndex(r, r.turn)];
   }
 
   private drawOne(r: Room): Card | undefined {
@@ -778,6 +825,22 @@ export class GameRoom extends DurableObject<Env> {
     return got;
   }
 
+  /** スタック中の罰札をドローし、drawnIds を立ててプレイ/キープ選択を出す */
+  private drawStack(r: Room, p: GPlayer): number {
+    const took = r.stack;
+    const ids: string[] = [];
+    for (let k = 0; k < took; k++) {
+      const c = this.drawOne(r);
+      if (!c) break;
+      p.hand.push(c);
+      ids.push(c.id);
+    }
+    r.stack = 0;
+    r.pendingKind = null;
+    if (ids.length > 0) r.drawnIds[p.id] = ids;
+    return took;
+  }
+
   /** 捨て札(山以外)をシャッフルしてデッキに戻す */
   private reshuffle(r: Room): Card | undefined {
     if (r.discard.length <= 1) return undefined;
@@ -787,12 +850,13 @@ export class GameRoom extends DurableObject<Env> {
     return r.deck.pop();
   }
 
-  /** 0: 手札を進行方向へ一枚ずつ回す */
+  /** 0: 手札を進行方向へ一枚ずつ回す(未終了プレイヤーのみ) */
   private rotateHands(r: Room) {
-    const n = r.players.length;
+    const active = r.players.filter((p) => p.rank == null);
+    const n = active.length;
     if (n < 2) return;
-    const old = r.players.map((p) => p.hand);
-    r.players.forEach((p, i) => {
+    const old = active.map((p) => p.hand);
+    active.forEach((p, i) => {
       p.hand = old[(i - r.direction + n) % n];
     });
   }
@@ -808,24 +872,56 @@ export class GameRoom extends DurableObject<Env> {
     return COLORS.reduce((a, b) => (counts[a] >= counts[b] ? a : b));
   }
 
-  private async endGame(r: Room, winner: GPlayer) {
+  /** プレイヤーの終了処理。残り1人になったらゲーム終了 */
+  private async finishPlayer(r: Room, p: GPlayer) {
+    const finished = r.players.filter((x) => x.rank != null).length;
+    p.rank = finished + 1;
+    r.rankings.push({ id: p.id, name: p.name, rank: p.rank });
+    // 残り1人(最後の一人)が決まったらゲーム終了
+    const remaining = r.players.filter((x) => x.rank == null).length;
+    if (remaining <= 1) {
+      const last = r.players.find((x) => x.rank == null);
+      if (last) {
+        last.rank = r.players.length;
+        r.rankings.push({ id: last.id, name: last.name, rank: last.rank });
+      }
+      await this.endGame(r);
+      return;
+    }
+    await this.endPlayerTurn(r, 1);
+  }
+
+  private async endGame(r: Room) {
     r.phase = "ended";
-    r.winner = { id: winner.id, name: winner.name };
     r.pickingBy = null;
     r.stack = 0;
     r.pendingKind = null;
     r.drawnIds = {};
     await this.ctx.storage.deleteAlarm();
+    r.rankings.sort((a, b) => a.rank - b.rank);
+    const winner = r.rankings[0];
     try {
       await this.env.DB.prepare(
         "INSERT INTO matches (room_code, winner_name, player_count) VALUES (?, ?, ?)",
       )
-        .bind(this.code, winner.name, r.players.length)
+        .bind(this.code, winner?.name ?? "", r.players.length)
         .run();
     } catch (e) {
       console.error("d1 insert failed:", e);
     }
     await this.publishLobby(r);
+  }
+
+  /** 部屋削除: 公開一覧(KV)から外し、DOストレージをクリア */
+  private async deleteRoom(r: Room) {
+    try {
+      await this.env.KV.delete(`room:${this.code}`);
+    } catch (e) {
+      console.error("kv delete error:", e);
+    }
+    this.lobbyPublished = false;
+    await this.ctx.storage.deleteAlarm();
+    await this.ctx.storage.deleteAll();
   }
 
   // ---- state 生成・配信 ----
@@ -840,7 +936,7 @@ export class GameRoom extends DurableObject<Env> {
       turn: r.turn,
       turnEndsAt: r.turnEndsAt,
       stack: r.stack,
-      winner: r.winner,
+      rankings: [...r.rankings].sort((a, b) => a.rank - b.rank),
       settings: r.settings,
     };
   }
@@ -854,6 +950,7 @@ export class GameRoom extends DurableObject<Env> {
       host: p.host,
       calledUno: p.calledUno,
       ready: p.ready,
+      rank: p.rank,
     }));
   }
 
@@ -914,8 +1011,13 @@ export class GameRoom extends DurableObject<Env> {
     return JSON.stringify(x);
   }
 
-  private stateFor(r: Room, playerId: string): string {
-    const s: StateSnapshot = { ...this.gameState(r), you: this.youView(r, playerId) };
+  private stateFor(r: Room, att: { playerId?: string; spectator?: boolean }): string {
+    const spectator = !!att?.spectator;
+    const s: StateSnapshot = {
+      ...this.gameState(r),
+      you: this.youView(r, att?.playerId ?? ""),
+      spectator,
+    };
     return this.m({ t: "state", s });
   }
 
@@ -932,20 +1034,23 @@ export class GameRoom extends DurableObject<Env> {
       }
     }
     for (const ws of this.ctx.getWebSockets()) {
-      const att = (ws.deserializeAttachment() as { playerId?: string });
+      const att = (ws.deserializeAttachment() as {
+        playerId?: string;
+        spectator?: boolean;
+      });
       try {
-        ws.send(this.stateFor(r, att?.playerId ?? ""));
+        ws.send(this.stateFor(r, att ?? {}));
       } catch {
         /* noop */
       }
     }
   }
 
-  /** ロビー公開の同期。broadcast ではなくライフサイクル変化時のみ呼ぶこと(KV制限対策) */
+  /** ロビー/対戦中公開の同期。broadcast ではなくライフサイクル変化時のみ呼ぶこと(KV制限対策) */
   private async publishLobby(r: Room) {
     const key = `room:${this.code}`;
     const want =
-      r.phase === "lobby" && r.publicRoom && r.players.length > 0;
+      r.phase !== "ended" && r.publicRoom && r.players.length > 0;
     try {
       if (want) {
         await this.env.KV.put(
@@ -954,6 +1059,7 @@ export class GameRoom extends DurableObject<Env> {
             code: this.code,
             count: r.players.length,
             max: r.settings.maxPlayers,
+            phase: r.phase as "lobby" | "playing",
           }),
           { expirationTtl: 3600 },
         );
