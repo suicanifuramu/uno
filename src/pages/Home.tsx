@@ -40,8 +40,6 @@ export default function Home() {
 
   useEffect(() => {
     refreshRooms();
-    const id = setInterval(refreshRooms, 5000);
-    return () => clearInterval(id);
   }, [refreshRooms]);
 
   const persistName = (v: string) => {
